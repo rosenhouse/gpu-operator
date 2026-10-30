@@ -202,6 +202,11 @@ func Test_isValidComponent(t *testing.T) {
 			want:      true,
 		},
 		{
+			name:      "valid vgpu-license component",
+			component: "vgpu-license",
+			want:      true,
+		},
+		{
 			name:      "valid nvidia-fs component using constant",
 			component: NVIDIAFS,
 			want:      true,
@@ -263,6 +268,30 @@ func Test_isValidComponent(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("isValidComponent() = %v, want %v", got, tt.want)
 			}
+		})
+	}
+}
+
+// The vgpu-license reporter patches its own Node, so it needs the node name.
+func TestValidateFlagsVGPULicense(t *testing.T) {
+	component, nodeName := componentFlag, nodeNameFlag
+	t.Cleanup(func() { componentFlag, nodeNameFlag = component, nodeName })
+	componentFlag = "vgpu-license"
+	for name, tc := range map[string]struct {
+		nodeName  string
+		wantError bool
+	}{
+		"node name set":     {nodeName: "node-1"},
+		"node name missing": {wantError: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			nodeNameFlag = tc.nodeName
+			_, err := validateFlags(t.Context(), nil)
+			if tc.wantError {
+				require.ErrorContains(t, err, "node-name")
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }

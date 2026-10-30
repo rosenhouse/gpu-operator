@@ -438,7 +438,7 @@ func validateFlags(ctx context.Context, cli *cli.Command) (context.Context, erro
 			return ctx, fmt.Errorf("invalid -n <node-name> flag: must not be empty string for metrics exporter")
 		}
 	}
-	if nodeNameFlag == "" && (componentFlag == "vfio-pci" || componentFlag == "vgpu-manager" || componentFlag == "vgpu-devices") {
+	if nodeNameFlag == "" && (componentFlag == "vfio-pci" || componentFlag == "vgpu-manager" || componentFlag == "vgpu-devices" || componentFlag == "vgpu-license") {
 		return ctx, fmt.Errorf("invalid -n <node-name> flag: must not be empty string for %s validation", componentFlag)
 	}
 
@@ -454,6 +454,8 @@ func isValidComponent() bool {
 	case "cuda":
 		fallthrough
 	case "metrics":
+		fallthrough
+	case "vgpu-license":
 		fallthrough
 	case "plugin":
 		fallthrough
@@ -613,6 +615,13 @@ func validateComponent(ctx context.Context, componentFlag string) error {
 		if err != nil {
 			return fmt.Errorf("error running validation-metrics exporter: %s", err)
 		}
+		return nil
+	case "vgpu-license":
+		reporter, err := NewLicenseReporter()
+		if err != nil {
+			return fmt.Errorf("error starting vGPU license reporter: %w", err)
+		}
+		reporter.Run(ctx)
 		return nil
 	case "vfio-pci":
 		vfioPCI := &VfioPCI{

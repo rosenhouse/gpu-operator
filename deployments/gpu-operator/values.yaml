@@ -76,6 +76,16 @@ validator:
   hostNetwork: false
   plugin:
     env: []
+  # Publish the vGPU license state of each GPU in the nvidia.com/vgpu-license
+  # Node annotation. When enabled, the operator adds a reporter to the
+  # operator-validator DaemonSet, as a native sidecar container, which requires
+  # Kubernetes 1.29 or later. It also adds a ClusterRole/ClusterRoleBinding that
+  # lets the operator-validator ServiceAccount, which all of that DaemonSet's
+  # containers use, patch every Node. The annotation holds the last published
+  # report; failed queries and disabling reporting leave it unchanged.
+  vgpuLicense:
+    enabled: false
+    env: []
 
 operator:
   repository: nvcr.io/nvidia

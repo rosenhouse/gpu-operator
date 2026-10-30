@@ -383,6 +383,9 @@ type ValidatorSpec struct {
 	// VGPUDevices validator spec
 	VGPUDevices VGPUDevicesValidatorSpec `json:"vgpuDevices,omitempty"`
 
+	// VGPULicense validator spec
+	VGPULicense VGPULicenseValidatorSpec `json:"vgpuLicense,omitempty"`
+
 	// Validator image repository
 	// +kubebuilder:validation:Optional
 	Repository string `json:"repository,omitempty"`
@@ -491,6 +494,23 @@ type VGPUManagerValidatorSpec struct {
 
 // VGPUDevicesValidatorSpec defines validator spec for NVIDIA vGPU device validator
 type VGPUDevicesValidatorSpec struct {
+	// Optional: List of environment variables
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors=true
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.displayName="Environment Variables"
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.x-descriptors="urn:alm:descriptor:com.tectonic.ui:advanced,urn:alm:descriptor:com.tectonic.ui:text"
+	Env []EnvVar `json:"env,omitempty"`
+}
+
+// VGPULicenseValidatorSpec defines the vGPU license reporter of the operator validator
+type VGPULicenseValidatorSpec struct {
+	// Enabled indicates if the operator validator publishes the vGPU license state of
+	// each GPU in the nvidia.com/vgpu-license Node annotation. The reporter runs as a
+	// native sidecar container, which requires Kubernetes v1.29 or later.
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors=true
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.displayName="Enable vGPU license reporting"
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.x-descriptors="urn:alm:descriptor:com.tectonic.ui:booleanSwitch"
+	Enabled *bool `json:"enabled,omitempty"`
+
 	// Optional: List of environment variables
 	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors=true
 	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.displayName="Environment Variables"
@@ -2407,6 +2427,15 @@ func (m *NodeStatusExporterSpec) IsEnabled() bool {
 		return false
 	}
 	return *m.Enabled
+}
+
+// IsEnabled returns true if the vGPU license reporter is enabled through gpu-operator
+func (l *VGPULicenseValidatorSpec) IsEnabled() bool {
+	if l.Enabled == nil {
+		// default is false if not specified by user
+		return false
+	}
+	return *l.Enabled
 }
 
 // IsEnabled returns true if GPUDirect RDMA are enabled through gpu-operator

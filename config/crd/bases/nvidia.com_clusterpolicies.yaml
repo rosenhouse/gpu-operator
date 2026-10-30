@@ -2712,6 +2712,32 @@ spec:
                           type: object
                         type: array
                     type: object
+                  vgpuLicense:
+                    description: VGPULicense validator spec
+                    properties:
+                      enabled:
+                        description: |-
+                          Enabled indicates if the operator validator publishes the vGPU license state of
+                          each GPU in the nvidia.com/vgpu-license Node annotation. The reporter runs as a
+                          native sidecar container, which requires Kubernetes v1.29 or later.
+                        type: boolean
+                      env:
+                        description: 'Optional: List of environment variables'
+                        items:
+                          description: EnvVar represents an environment variable present
+                            in a Container.
+                          properties:
+                            name:
+                              description: Name of the environment variable.
+                              type: string
+                            value:
+                              description: Value of the environment variable.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                    type: object
                   vgpuManager:
                     description: VGPUManager validator spec
                     properties:

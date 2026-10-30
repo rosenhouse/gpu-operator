@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -48,6 +49,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/yaml"
 
 	gpuv1 "github.com/NVIDIA/gpu-operator/api/nvidia/v1"
 	nvidiav1alpha1 "github.com/NVIDIA/gpu-operator/api/nvidia/v1alpha1"
@@ -1918,6 +1920,89 @@ func TestDCGMExporter(t *testing.T) {
 			}
 			clusterPolicyController.idx--
 		})
+	}
+}
+
+// The license role grants patch on nodes, so it exists only while license
+// reporting is enabled. The cases run in order against one state.
+func TestOperatorValidatorLicenseRBAC(t *testing.T) {
+	const baseName, licenseName = "nvidia-operator-validator", "nvidia-operator-validator-license"
+	controller := ClusterPolicyController{
+		ctx:               t.Context(),
+		client:            fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		scheme:            scheme.Scheme,
+		logger:            ctrl.Log.WithName("test"),
+		operatorNamespace: "gpu-operator",
+	}
+	addState(&controller, filepath.Join(cfg.root, "assets/state-operator-validation"))
+
+	// The controller sets the operator namespace on cluster-scoped objects too,
+	// which the fake client keeps.
+	exists := func(obj client.Object, name string) bool {
+		t.Helper()
+		err := controller.client.Get(t.Context(), client.ObjectKey{Namespace: controller.operatorNamespace, Name: name}, obj)
+		if apierrors.IsNotFound(err) {
+			return false
+		}
+		require.NoError(t, err)
+		return true
+	}
+	for _, tc := range []struct {
+		name        string
+		enabled     *bool
+		wantLicense bool
+	}{
+		{name: "reporting off"},
+		{name: "reporting on", enabled: new(true), wantLicense: true},
+		{name: "reporting turned off again", enabled: new(false)},
+		{name: "reporting reenabled", enabled: new(true), wantLicense: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cp := clusterPolicy.DeepCopy()
+			cp.Spec.Validator.VGPULicense.Enabled = tc.enabled
+			controller.singleton = cp
+			roles, err := ClusterRoles(controller)
+			require.NoError(t, err)
+			bindings, err := ClusterRoleBindings(controller)
+			require.NoError(t, err)
+			// The validator's own role keeps the state Ready either way.
+			require.Equal(t, gpuv1.Ready, roles)
+			require.Equal(t, gpuv1.Ready, bindings)
+
+			require.True(t, exists(&rbacv1.ClusterRole{}, baseName))
+			require.True(t, exists(&rbacv1.ClusterRoleBinding{}, baseName))
+			require.Equal(t, tc.wantLicense, exists(&rbacv1.ClusterRole{}, licenseName))
+			licenseBinding := &rbacv1.ClusterRoleBinding{}
+			require.Equal(t, tc.wantLicense, exists(licenseBinding, licenseName))
+			if tc.wantLicense {
+				require.Equal(t, licenseName, licenseBinding.RoleRef.Name)
+				require.Equal(t, []rbacv1.Subject{{Kind: "ServiceAccount", Name: baseName, Namespace: "gpu-operator"}}, licenseBinding.Subjects,
+					"the license role is bound to the validator's ServiceAccount")
+			}
+		})
+	}
+}
+
+// The license role grants only patch on nodes, and the validator's own role does
+// not write Nodes, so the permission to patch them exists only while license
+// reporting is enabled.
+func TestOperatorValidatorLicenseRBACAssets(t *testing.T) {
+	read := func(asset string) rbacv1.ClusterRole {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(cfg.root, "assets/state-operator-validation", asset))
+		require.NoError(t, err)
+		var role rbacv1.ClusterRole
+		require.NoError(t, yaml.Unmarshal(data, &role))
+		return role
+	}
+	require.Equal(t, []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"patch"}}},
+		read("0220_clusterrole_license.yaml").Rules)
+	for _, rule := range read("0210_clusterrole.yaml").Rules {
+		if slices.Contains(rule.Resources, "nodes") || slices.Contains(rule.Resources, "*") {
+			for _, verb := range []string{"patch", "update", "*"} {
+				require.NotContains(t, rule.Verbs, verb, "the validator's own role must not write Nodes")
+			}
+		}
 	}
 }
 

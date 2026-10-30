@@ -139,6 +139,15 @@ spec:
       env: []
       {{- end }}
     {{- end }}
+    {{- if .Values.validator.vgpuLicense }}
+    vgpuLicense:
+      enabled: {{ .Values.validator.vgpuLicense.enabled | default false }}
+      {{- if .Values.validator.vgpuLicense.env }}
+      env: {{ toYaml .Values.validator.vgpuLicense.env | nindent 8 }}
+      {{- else }}
+      env: []
+      {{- end }}
+    {{- end }}
   mig:
     {{- if .Values.mig.strategy }}
     strategy: {{ .Values.mig.strategy }}

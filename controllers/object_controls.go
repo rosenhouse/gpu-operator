@@ -129,6 +129,9 @@ const (
 	DCGMExporterPodUIDEnvName = "DCGM_EXPORTER_KUBERNETES_ENABLE_POD_UID"
 	// DCGMExporterPodLabelAllowlistEnvName is the env name holding the exported pod label allowlist
 	DCGMExporterPodLabelAllowlistEnvName = "DCGM_EXPORTER_KUBERNETES_POD_LABEL_ALLOWLIST_REGEX"
+	// vgpuLicenseMinimumK8sVersion is the first Kubernetes release that enables native
+	// sidecar containers, such as the vGPU license reporter, by default.
+	vgpuLicenseMinimumK8sVersion = "v1.29"
 	// GPUDirectRDMAEnabledEnvName indicates if GPU direct RDMA is enabled through GPU operator
 	GPUDirectRDMAEnabledEnvName = "GPU_DIRECT_RDMA_ENABLED"
 	// UseHostMOFEDEnvName indicates if MOFED driver is pre-installed on the host
@@ -472,6 +475,9 @@ var rbacGates = map[string]func(*gpuv1.ClusterPolicySpec) bool{
 		return config.DCGMExporter.IsKubernetesPodMetadataEnabled() ||
 			dcgmExporterEnvEnablesPodMetadata(config.DCGMExporter.Env)
 	},
+	"nvidia-operator-validator-license": func(config *gpuv1.ClusterPolicySpec) bool {
+		return config.Validator.VGPULicense.IsEnabled()
+	},
 }
 
 func isRBACEnabled(name string, config *gpuv1.ClusterPolicySpec) bool {
@@ -482,11 +488,27 @@ func isRBACEnabled(name string, config *gpuv1.ClusterPolicySpec) bool {
 	return gate(config)
 }
 
-// ClusterRole creates ClusterRole resource
-func ClusterRole(n ClusterPolicyController) (gpuv1.State, error) {
+// ClusterRoles creates the ClusterRole resources of a state. A ClusterRole that
+// rbacGates disables is deleted, and the state is Ready if any is created.
+func ClusterRoles(n ClusterPolicyController) (gpuv1.State, error) {
+	status := gpuv1.Disabled
+	for i := range n.resources[n.idx].ClusterRoles {
+		stat, err := createClusterRole(n, i)
+		if err != nil {
+			return stat, err
+		}
+		if stat == gpuv1.Ready {
+			status = gpuv1.Ready
+		}
+	}
+	return status, nil
+}
+
+// createClusterRole creates a ClusterRole resource
+func createClusterRole(n ClusterPolicyController, clusterRoleIdx int) (gpuv1.State, error) {
 	ctx := n.ctx
 	state := n.idx
-	obj := n.resources[state].ClusterRole.DeepCopy()
+	obj := n.resources[state].ClusterRoles[clusterRoleIdx].DeepCopy()
 	obj.Namespace = n.operatorNamespace
 
 	logger := n.logger.WithValues("ClusterRole", obj.Name, "Namespace", obj.Namespace)
@@ -532,11 +554,28 @@ func ClusterRole(n ClusterPolicyController) (gpuv1.State, error) {
 	return gpuv1.Ready, nil
 }
 
-// ClusterRoleBinding creates ClusterRoleBinding resource
-func ClusterRoleBinding(n ClusterPolicyController) (gpuv1.State, error) {
+// ClusterRoleBindings creates the ClusterRoleBinding resources of a state. A
+// ClusterRoleBinding that rbacGates disables is deleted, and the state is Ready if
+// any is created.
+func ClusterRoleBindings(n ClusterPolicyController) (gpuv1.State, error) {
+	status := gpuv1.Disabled
+	for i := range n.resources[n.idx].ClusterRoleBindings {
+		stat, err := createClusterRoleBinding(n, i)
+		if err != nil {
+			return stat, err
+		}
+		if stat == gpuv1.Ready {
+			status = gpuv1.Ready
+		}
+	}
+	return status, nil
+}
+
+// createClusterRoleBinding creates a ClusterRoleBinding resource
+func createClusterRoleBinding(n ClusterPolicyController, clusterRoleBindingIdx int) (gpuv1.State, error) {
 	ctx := n.ctx
 	state := n.idx
-	obj := n.resources[state].ClusterRoleBinding.DeepCopy()
+	obj := n.resources[state].ClusterRoleBindings[clusterRoleBindingIdx].DeepCopy()
 	obj.Namespace = n.operatorNamespace
 
 	logger := n.logger.WithValues("ClusterRoleBinding", obj.Name, "Namespace", obj.Namespace)
@@ -2371,6 +2410,14 @@ func TransformValidator(obj *appsv1.DaemonSet, config *gpuv1.ClusterPolicySpec, 
 		setNRIPluginAnnotation(&obj.Spec.Template.ObjectMeta, &config.CDI, toolkitValidationCtr.Name)
 	}
 
+	if config.Validator.VGPULicense.IsEnabled() {
+		if err := checkVGPULicenseK8sVersion(n.k8sVersion); err != nil {
+			return err
+		}
+		// The reporter runs the nvidia-smi that the toolkit injects, as toolkit-validation does.
+		setNRIPluginAnnotation(&obj.Spec.Template.ObjectMeta, &config.CDI, "vgpu-license-validation")
+	}
+
 	var validatorErr error
 	// apply changes for individual component validators(initContainers)
 	components := []string{
@@ -2380,6 +2427,7 @@ func TransformValidator(obj *appsv1.DaemonSet, config *gpuv1.ClusterPolicySpec, 
 		"toolkit",
 		"cuda",
 		"plugin",
+		"vgpu-license",
 	}
 
 	for _, component := range components {
@@ -2395,6 +2443,19 @@ func TransformValidator(obj *appsv1.DaemonSet, config *gpuv1.ClusterPolicySpec, 
 	// set hostNetwork for validator if specified
 	applyHostNetworkConfig(&obj.Spec.Template.Spec, config.Validator.HostNetwork)
 
+	return nil
+}
+
+// checkVGPULicenseK8sVersion returns an error unless Kubernetes runs the vGPU
+// license reporter, a native sidecar container. On older releases the reporter
+// would run as a plain init container that never exits, and block the validator.
+func checkVGPULicenseK8sVersion(k8sVersion string) error {
+	version, err := semver.NewVersion(k8sVersion)
+	minimum := semver.MustParse(vgpuLicenseMinimumK8sVersion)
+	// Compare only the release, so that vendor suffixes such as -eks-1 do not count.
+	if err != nil || version.Major() < minimum.Major() || (version.Major() == minimum.Major() && version.Minor() < minimum.Minor()) {
+		return fmt.Errorf("validator.vgpuLicense requires Kubernetes %s or later, found %q", vgpuLicenseMinimumK8sVersion, k8sVersion)
+	}
 	return nil
 }
 
@@ -2536,6 +2597,18 @@ func TransformValidatorComponent(config *gpuv1.ClusterPolicySpec, podSpec *corev
 			// set/append environment variables for driver-validation container
 			if len(config.Validator.Driver.Env) > 0 {
 				for _, env := range config.Validator.Driver.Env {
+					setContainerEnv(&(podSpec.InitContainers[i]), env.Name, env.Value)
+				}
+			}
+		case "vgpu-license":
+			// remove vgpu-license init container from validator Daemonset if license reporting is not enabled
+			if !config.Validator.VGPULicense.IsEnabled() {
+				podSpec.InitContainers = append(podSpec.InitContainers[:i], podSpec.InitContainers[i+1:]...)
+				return nil
+			}
+			// set/append environment variables for vgpu-license-validation container
+			if len(config.Validator.VGPULicense.Env) > 0 {
+				for _, env := range config.Validator.VGPULicense.Env {
 					setContainerEnv(&(podSpec.InitContainers[i]), env.Name, env.Value)
 				}
 			}

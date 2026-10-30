@@ -17,9 +17,11 @@
 package controllers
 
 import (
+	"cmp"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -2873,6 +2875,41 @@ func TestTransformValidatorComponent(t *testing.T) {
 			expectedPod: NewPod(),
 		},
 		{
+			description: "vgpu-license validation is removed unless license reporting is enabled",
+			pod: NewPod().
+				WithInitContainer(corev1.Container{Name: "vgpu-license-validation"}).
+				WithInitContainer(corev1.Container{Name: "dummy"}),
+			cpSpec: &gpuv1.ClusterPolicySpec{
+				Validator: gpuv1.ValidatorSpec{Repository: "nvcr.io/nvidia/cloud-native", Image: "gpu-operator-validator", Version: "v1.0.0"},
+			},
+			component:   "vgpu-license",
+			expectedPod: NewPod().WithInitContainer(corev1.Container{Name: "dummy"}),
+		},
+		{
+			description: "vgpu-license validation",
+			pod:         NewPod().WithInitContainer(corev1.Container{Name: "vgpu-license-validation"}),
+			cpSpec: &gpuv1.ClusterPolicySpec{
+				Validator: gpuv1.ValidatorSpec{
+					Repository:      "nvcr.io/nvidia/cloud-native",
+					Image:           "gpu-operator-validator",
+					Version:         "v1.0.0",
+					ImagePullPolicy: "IfNotPresent",
+					VGPULicense: gpuv1.VGPULicenseValidatorSpec{
+						Enabled: new(true),
+						Env:     []gpuv1.EnvVar{{Name: "foo", Value: "bar"}},
+					},
+				},
+			},
+			component: "vgpu-license",
+			expectedPod: NewPod().WithInitContainer(corev1.Container{
+				Name:            "vgpu-license-validation",
+				Image:           "nvcr.io/nvidia/cloud-native/gpu-operator-validator:v1.0.0",
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				Env:             []corev1.EnvVar{{Name: "foo", Value: "bar"}},
+				SecurityContext: &corev1.SecurityContext{RunAsUser: rootUID},
+			}),
+		},
+		{
 			description: "invalid component",
 			pod:         NewPod().WithInitContainer(corev1.Container{Name: "invalid-validation"}),
 			cpSpec: &gpuv1.ClusterPolicySpec{
@@ -3324,6 +3361,83 @@ func TestTransformValidator(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.EqualValues(t, tc.expectedDs, tc.ds)
+		})
+	}
+}
+
+// The reporter is a native sidecar of the validator only while license
+// reporting is enabled, and then runs the validator image with the nvidia-smi
+// that the container toolkit injects.
+func TestTransformValidatorVGPULicenseReporter(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(cfg.root, "assets/state-operator-validation/0500_daemonset.yaml"))
+	require.NoError(t, err)
+	resources := &gpuv1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("200Mi")}}
+	for name, tc := range map[string]struct {
+		enabled      *bool
+		nriPlugin    bool
+		k8sVersion   string
+		wantReporter bool
+		wantError    string
+	}{
+		"reporting off":                    {},
+		"reporting disabled":               {enabled: new(false)},
+		"reporting on":                     {enabled: new(true), wantReporter: true},
+		"reporting on with the NRI plugin": {enabled: new(true), nriPlugin: true, wantReporter: true},
+		"vendor release suffix":            {enabled: new(true), k8sVersion: "v1.29.0-eks-1", wantReporter: true},
+		// Without native sidecars, the reporter would block the validator forever.
+		"reporting on before Kubernetes 1.29":  {enabled: new(true), k8sVersion: "v1.28.9", wantError: "requires Kubernetes v1.29 or later"},
+		"reporting off before Kubernetes 1.29": {k8sVersion: "v1.28.9"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var ds appsv1.DaemonSet
+			require.NoError(t, yaml.Unmarshal(data, &ds))
+			cp := &gpuv1.ClusterPolicy{Spec: gpuv1.ClusterPolicySpec{
+				Validator: gpuv1.ValidatorSpec{
+					Repository: "nvcr.io/nvidia", Image: "gpu-operator", Version: "test", ImagePullPolicy: "Always",
+					ImagePullSecrets: []string{"pull-secret"}, Resources: resources,
+					VGPULicense: gpuv1.VGPULicenseValidatorSpec{Enabled: tc.enabled},
+				},
+				CDI: gpuv1.CDIConfigSpec{Enabled: new(true), NRIPluginEnabled: new(tc.nriPlugin)},
+			}}
+			controller := ClusterPolicyController{singleton: cp, logger: ctrl.Log.WithName("test"), k8sVersion: cmp.Or(tc.k8sVersion, "v1.37.0")}
+			err := preProcessDaemonSet(&ds, controller)
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+
+			podSpec := ds.Spec.Template.Spec
+			names := make([]string, 0, len(podSpec.InitContainers))
+			for _, c := range podSpec.InitContainers {
+				names = append(names, c.Name)
+			}
+			reporter := findContainerByName(podSpec.InitContainers, "vgpu-license-validation")
+			if !tc.wantReporter {
+				require.Nil(t, reporter)
+				require.NotContains(t, ds.Spec.Template.Annotations, "nvidia.cdi.k8s.io/container.vgpu-license-validation")
+				return
+			}
+			require.NotNil(t, reporter)
+			// It starts once toolkit-validation has passed, before the validations that
+			// need a working GPU.
+			require.Equal(t, "vgpu-license-validation", names[slices.Index(names, "toolkit-validation")+1])
+			require.Equal(t, new(corev1.ContainerRestartPolicyAlways), reporter.RestartPolicy)
+			require.Equal(t, "nvcr.io/nvidia/gpu-operator:test", reporter.Image)
+			require.Equal(t, corev1.PullAlways, reporter.ImagePullPolicy)
+			require.Equal(t, rootUID, reporter.SecurityContext.RunAsUser)
+			require.Equal(t, resources.Limits, reporter.Resources.Limits)
+			require.Contains(t, reporter.Env, corev1.EnvVar{Name: "NVIDIA_VISIBLE_DEVICES", Value: "all"})
+			require.Contains(t, reporter.Env, corev1.EnvVar{Name: "COMPONENT", Value: "vgpu-license"})
+			// The toolkit injects the driver, so the reporter mounts only the validator's
+			// own directory, read-only.
+			require.Equal(t, []corev1.VolumeMount{{Name: "run-nvidia-validations", MountPath: "/run/nvidia/validations", ReadOnly: true}}, reporter.VolumeMounts)
+			require.Equal(t, []corev1.LocalObjectReference{{Name: "pull-secret"}}, podSpec.ImagePullSecrets)
+			annotation, ok := ds.Spec.Template.Annotations["nvidia.cdi.k8s.io/container.vgpu-license-validation"]
+			require.Equal(t, tc.nriPlugin, ok)
+			if tc.nriPlugin {
+				require.Equal(t, "management.nvidia.com/gpu=all", annotation)
+			}
 		})
 	}
 }
