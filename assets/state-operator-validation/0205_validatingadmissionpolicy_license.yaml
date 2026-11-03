@@ -1,0 +1,42 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nvidia-operator-validator-license
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:   [""]
+      apiVersions: ["v1"]
+      operations:  ["UPDATE"]
+      resources:   ["nodes"]
+  matchConditions:
+  - name: isRestrictedUser
+    expression: >-
+      request.userInfo.username == "system:serviceaccount:FILLED BY THE OPERATOR:nvidia-operator-validator"
+  variables:
+  - name: userNodeName
+    expression: >-
+      request.userInfo.extra[?'authentication.kubernetes.io/node-name'][0].orValue('')
+  - name: oldAnnotations
+    expression: >-
+      oldObject.metadata.?annotations.orValue({})
+  - name: newAnnotations
+    expression: >-
+      object.metadata.?annotations.orValue({})
+  validations:
+  - expression: variables.userNodeName != ""
+    message: >-
+      no node association found for user, this user must run in a pod on a node and ServiceAccountTokenPodNodeInfo must be enabled
+  - expression: object.metadata.name == variables.userNodeName
+    messageExpression: >-
+      "this user running on node '" + variables.userNodeName + "' may not modify other Nodes"
+  - expression: >-
+      object.spec == oldObject.spec &&
+      object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({}) &&
+      object.metadata.?finalizers.orValue([]) == oldObject.metadata.?finalizers.orValue([]) &&
+      object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([]) &&
+      variables.oldAnnotations.all(k, k == "nvidia.com/vgpu-license" || (k in variables.newAnnotations && variables.newAnnotations[k] == variables.oldAnnotations[k])) &&
+      variables.newAnnotations.all(k, k == "nvidia.com/vgpu-license" || k in variables.oldAnnotations)
+    message: >-
+      this user may only change the nvidia.com/vgpu-license annotation of its Node

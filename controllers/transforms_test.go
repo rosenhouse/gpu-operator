@@ -3383,10 +3383,10 @@ func TestTransformValidatorVGPULicenseReporter(t *testing.T) {
 		"reporting disabled":               {enabled: new(false)},
 		"reporting on":                     {enabled: new(true), wantReporter: true},
 		"reporting on with the NRI plugin": {enabled: new(true), nriPlugin: true, wantReporter: true},
-		"vendor release suffix":            {enabled: new(true), k8sVersion: "v1.29.0-eks-1", wantReporter: true},
-		// Without native sidecars, the reporter would block the validator forever.
-		"reporting on before Kubernetes 1.29":  {enabled: new(true), k8sVersion: "v1.28.9", wantError: "requires Kubernetes v1.29 or later"},
-		"reporting off before Kubernetes 1.29": {k8sVersion: "v1.28.9"},
+		"vendor release suffix":            {enabled: new(true), k8sVersion: "v1.30.0-eks-1", wantReporter: true},
+		// Without ValidatingAdmissionPolicy, nothing would limit the reporter.
+		"reporting on before Kubernetes 1.30":  {enabled: new(true), k8sVersion: "v1.29.9", wantError: "requires Kubernetes v1.30 or later"},
+		"reporting off before Kubernetes 1.30": {k8sVersion: "v1.29.9"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var ds appsv1.DaemonSet

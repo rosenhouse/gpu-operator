@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	nodev1 "k8s.io/api/node/v1"
@@ -47,22 +48,24 @@ type assetsFromFile []byte
 
 // Resources indicates resources managed by GPU operator
 type Resources struct {
-	ServiceAccount             corev1.ServiceAccount
-	Role                       rbacv1.Role
-	RoleBinding                rbacv1.RoleBinding
-	ClusterRoles               []rbacv1.ClusterRole
-	ClusterRoleBindings        []rbacv1.ClusterRoleBinding
-	ConfigMaps                 []corev1.ConfigMap
-	DaemonSet                  appsv1.DaemonSet
-	Deployment                 appsv1.Deployment
-	Pod                        corev1.Pod
-	Service                    corev1.Service
-	ServiceMonitor             promv1.ServiceMonitor
-	PriorityClass              schedv1.PriorityClass
-	Taint                      corev1.Taint
-	SecurityContextConstraints secv1.SecurityContextConstraints
-	RuntimeClasses             []nodev1.RuntimeClass
-	PrometheusRule             promv1.PrometheusRule
+	ServiceAccount                   corev1.ServiceAccount
+	Role                             rbacv1.Role
+	RoleBinding                      rbacv1.RoleBinding
+	ClusterRoles                     []rbacv1.ClusterRole
+	ClusterRoleBindings              []rbacv1.ClusterRoleBinding
+	ValidatingAdmissionPolicy        admissionregistrationv1.ValidatingAdmissionPolicy
+	ValidatingAdmissionPolicyBinding admissionregistrationv1.ValidatingAdmissionPolicyBinding
+	ConfigMaps                       []corev1.ConfigMap
+	DaemonSet                        appsv1.DaemonSet
+	Deployment                       appsv1.Deployment
+	Pod                              corev1.Pod
+	Service                          corev1.Service
+	ServiceMonitor                   promv1.ServiceMonitor
+	PriorityClass                    schedv1.PriorityClass
+	Taint                            corev1.Taint
+	SecurityContextConstraints       secv1.SecurityContextConstraints
+	RuntimeClasses                   []nodev1.RuntimeClass
+	PrometheusRule                   promv1.PrometheusRule
 }
 
 func filePathWalkDir(n *ClusterPolicyController, root string) ([]string, error) {
@@ -159,6 +162,14 @@ func addResourcesControls(n *ClusterPolicyController, path string) (Resources, c
 			if len(res.ClusterRoleBindings) == 1 {
 				ctrl = append(ctrl, ClusterRoleBindings)
 			}
+		case "ValidatingAdmissionPolicy":
+			_, _, err := s.Decode(m, nil, &res.ValidatingAdmissionPolicy)
+			panicIfError(err)
+			ctrl = append(ctrl, ValidatingAdmissionPolicy)
+		case "ValidatingAdmissionPolicyBinding":
+			_, _, err := s.Decode(m, nil, &res.ValidatingAdmissionPolicyBinding)
+			panicIfError(err)
+			ctrl = append(ctrl, ValidatingAdmissionPolicyBinding)
 		case "ConfigMap":
 			cm := corev1.ConfigMap{}
 			_, _, err := s.Decode(m, nil, &cm)

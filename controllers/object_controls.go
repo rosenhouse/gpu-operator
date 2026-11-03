@@ -34,6 +34,7 @@ import (
 	apiimagev1 "github.com/openshift/api/image/v1"
 	secv1 "github.com/openshift/api/security/v1"
 	promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	nodev1 "k8s.io/api/node/v1"
@@ -129,9 +130,10 @@ const (
 	DCGMExporterPodUIDEnvName = "DCGM_EXPORTER_KUBERNETES_ENABLE_POD_UID"
 	// DCGMExporterPodLabelAllowlistEnvName is the env name holding the exported pod label allowlist
 	DCGMExporterPodLabelAllowlistEnvName = "DCGM_EXPORTER_KUBERNETES_POD_LABEL_ALLOWLIST_REGEX"
-	// vgpuLicenseMinimumK8sVersion is the first Kubernetes release that enables native
-	// sidecar containers, such as the vGPU license reporter, by default.
-	vgpuLicenseMinimumK8sVersion = "v1.29"
+	// vgpuLicenseMinimumK8sVersion is the first Kubernetes release that enables, by
+	// default, native sidecar containers, such as the vGPU license reporter, and the
+	// ValidatingAdmissionPolicy API and token node claim that its policy relies on.
+	vgpuLicenseMinimumK8sVersion = "v1.30"
 	// GPUDirectRDMAEnabledEnvName indicates if GPU direct RDMA is enabled through GPU operator
 	GPUDirectRDMAEnabledEnvName = "GPU_DIRECT_RDMA_ENABLED"
 	// UseHostMOFEDEnvName indicates if MOFED driver is pre-installed on the host
@@ -470,6 +472,8 @@ func RoleBinding(n ClusterPolicyController) (gpuv1.State, error) {
 	return gpuv1.Ready, nil
 }
 
+// rbacGates turns optional access control objects, RBAC and admission policies,
+// on and off by name.
 var rbacGates = map[string]func(*gpuv1.ClusterPolicySpec) bool{
 	"nvidia-dcgm-exporter-read-pods": func(config *gpuv1.ClusterPolicySpec) bool {
 		return config.DCGMExporter.IsKubernetesPodMetadataEnabled() ||
@@ -622,6 +626,63 @@ func createClusterRoleBinding(n ClusterPolicyController, clusterRoleBindingIdx i
 		return gpuv1.NotReady, err
 	}
 
+	return gpuv1.Ready, nil
+}
+
+// ValidatingAdmissionPolicy creates the ValidatingAdmissionPolicy resource of a state
+func ValidatingAdmissionPolicy(n ClusterPolicyController) (gpuv1.State, error) {
+	obj := n.resources[n.idx].ValidatingAdmissionPolicy.DeepCopy()
+	// Match conditions name the operator's ServiceAccounts, which live in its namespace.
+	for i := range obj.Spec.MatchConditions {
+		obj.Spec.MatchConditions[i].Expression = strings.ReplaceAll(obj.Spec.MatchConditions[i].Expression, "FILLED BY THE OPERATOR", n.operatorNamespace)
+	}
+	return createGatedClusterObject(n, obj, &admissionregistrationv1.ValidatingAdmissionPolicy{})
+}
+
+// ValidatingAdmissionPolicyBinding creates the ValidatingAdmissionPolicyBinding resource of a state
+func ValidatingAdmissionPolicyBinding(n ClusterPolicyController) (gpuv1.State, error) {
+	obj := n.resources[n.idx].ValidatingAdmissionPolicyBinding.DeepCopy()
+	return createGatedClusterObject(n, obj, &admissionregistrationv1.ValidatingAdmissionPolicyBinding{})
+}
+
+// createGatedClusterObject creates or updates a cluster-scoped object of the
+// current state, or deletes it while the state or the object's rbacGates gate is
+// disabled. found receives the existing object, whose resourceVersion the update
+// needs.
+func createGatedClusterObject(n ClusterPolicyController, obj, found client.Object) (gpuv1.State, error) {
+	ctx := n.ctx
+	logger := n.logger.WithValues("Kind", obj.GetObjectKind().GroupVersionKind().Kind, "Name", obj.GetName())
+
+	if !n.isStateEnabled(n.stateNames[n.idx]) || !isRBACEnabled(obj.GetName(), &n.singleton.Spec) {
+		err := n.client.Delete(ctx, obj)
+		if err != nil && !apierrors.IsNotFound(err) {
+			logger.Info("Couldn't delete", "Error", err)
+			return gpuv1.NotReady, err
+		}
+		return gpuv1.Disabled, nil
+	}
+
+	if err := controllerutil.SetControllerReference(n.singleton, obj, n.scheme); err != nil {
+		return gpuv1.NotReady, err
+	}
+
+	err := n.client.Get(ctx, client.ObjectKeyFromObject(obj), found)
+	if apierrors.IsNotFound(err) {
+		if err := n.client.Create(ctx, obj); err != nil {
+			logger.Info("Couldn't create", "Error", err)
+			return gpuv1.NotReady, err
+		}
+		return gpuv1.Ready, nil
+	} else if err != nil {
+		return gpuv1.NotReady, err
+	}
+
+	logger.Info("Found Resource, updating...")
+	obj.SetResourceVersion(found.GetResourceVersion())
+	if err := n.client.Update(ctx, obj); err != nil {
+		logger.Info("Couldn't update", "Error", err)
+		return gpuv1.NotReady, err
+	}
 	return gpuv1.Ready, nil
 }
 
@@ -2447,8 +2508,9 @@ func TransformValidator(obj *appsv1.DaemonSet, config *gpuv1.ClusterPolicySpec, 
 }
 
 // checkVGPULicenseK8sVersion returns an error unless Kubernetes runs the vGPU
-// license reporter, a native sidecar container. On older releases the reporter
-// would run as a plain init container that never exits, and block the validator.
+// license reporter, a native sidecar container, and enforces the policy that limits
+// it. Before 1.29 the reporter would run as a plain init container that never
+// exits, and block the validator; before 1.30 the policy could not be enforced.
 func checkVGPULicenseK8sVersion(k8sVersion string) error {
 	version, err := semver.NewVersion(k8sVersion)
 	minimum := semver.MustParse(vgpuLicenseMinimumK8sVersion)

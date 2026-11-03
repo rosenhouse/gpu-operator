@@ -32,6 +32,7 @@ import (
 	secv1 "github.com/openshift/api/security/v1"
 	promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/stretchr/testify/require"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	nodev1 "k8s.io/api/node/v1"
@@ -1923,9 +1924,10 @@ func TestDCGMExporter(t *testing.T) {
 	}
 }
 
-// The license role grants patch on nodes, so it exists only while license
-// reporting is enabled. The cases run in order against one state.
-func TestOperatorValidatorLicenseRBAC(t *testing.T) {
+// The license role grants patch on nodes, so it and the admission policy that
+// limits it exist only while license reporting is enabled. The cases run in order
+// against one state.
+func TestOperatorValidatorLicenseAccessControl(t *testing.T) {
 	const baseName, licenseName = "nvidia-operator-validator", "nvidia-operator-validator-license"
 	controller := ClusterPolicyController{
 		ctx:               t.Context(),
@@ -1961,6 +1963,11 @@ func TestOperatorValidatorLicenseRBAC(t *testing.T) {
 			cp := clusterPolicy.DeepCopy()
 			cp.Spec.Validator.VGPULicense.Enabled = tc.enabled
 			controller.singleton = cp
+			// The policy is created first, so that it is in force before the role is.
+			_, err := ValidatingAdmissionPolicy(controller)
+			require.NoError(t, err)
+			_, err = ValidatingAdmissionPolicyBinding(controller)
+			require.NoError(t, err)
 			roles, err := ClusterRoles(controller)
 			require.NoError(t, err)
 			bindings, err := ClusterRoleBindings(controller)
@@ -1968,6 +1975,24 @@ func TestOperatorValidatorLicenseRBAC(t *testing.T) {
 			// The validator's own role keeps the state Ready either way.
 			require.Equal(t, gpuv1.Ready, roles)
 			require.Equal(t, gpuv1.Ready, bindings)
+
+			policy := &admissionregistrationv1.ValidatingAdmissionPolicy{}
+			policyErr := controller.client.Get(t.Context(), client.ObjectKey{Name: licenseName}, policy)
+			policyBinding := &admissionregistrationv1.ValidatingAdmissionPolicyBinding{}
+			policyBindingErr := controller.client.Get(t.Context(), client.ObjectKey{Name: licenseName}, policyBinding)
+			if !tc.wantLicense {
+				require.True(t, apierrors.IsNotFound(policyErr), "policy: %v", policyErr)
+				require.True(t, apierrors.IsNotFound(policyBindingErr), "policy binding: %v", policyBindingErr)
+			} else {
+				require.NoError(t, policyErr)
+				require.NoError(t, policyBindingErr)
+				require.Equal(t, []admissionregistrationv1.MatchCondition{{
+					Name:       "isRestrictedUser",
+					Expression: `request.userInfo.username == "system:serviceaccount:gpu-operator:nvidia-operator-validator"`,
+				}}, policy.Spec.MatchConditions, "the policy applies to the validator's ServiceAccount")
+				require.Equal(t, licenseName, policyBinding.Spec.PolicyName)
+				require.Equal(t, []admissionregistrationv1.ValidationAction{admissionregistrationv1.Deny}, policyBinding.Spec.ValidationActions)
+			}
 
 			require.True(t, exists(&rbacv1.ClusterRole{}, baseName))
 			require.True(t, exists(&rbacv1.ClusterRoleBinding{}, baseName))

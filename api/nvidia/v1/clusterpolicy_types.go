@@ -504,8 +504,9 @@ type VGPUDevicesValidatorSpec struct {
 // VGPULicenseValidatorSpec defines the vGPU license reporter of the operator validator
 type VGPULicenseValidatorSpec struct {
 	// Enabled indicates if the operator validator publishes the vGPU license state of
-	// each GPU in the nvidia.com/vgpu-license Node annotation. The reporter runs as a
-	// native sidecar container, which requires Kubernetes v1.29 or later.
+	// each GPU in the nvidia.com/vgpu-license Node annotation. This requires
+	// Kubernetes v1.30 or later: the reporter runs as a native sidecar container, and
+	// a ValidatingAdmissionPolicy limits it to the annotation of its own Node.
 	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors=true
 	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.displayName="Enable vGPU license reporting"
 	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.x-descriptors="urn:alm:descriptor:com.tectonic.ui:booleanSwitch"
